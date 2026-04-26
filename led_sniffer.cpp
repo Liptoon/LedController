@@ -78,9 +78,10 @@ std::vector<uint8_t> LEDController::build_png_from_rgb(
 }
 
 // ---------------------------------------------------------------------------
-// Build BLE frame wrapper around PNG bytes
+// Build BLE frame for a PNG image (Show Image command)
 // ---------------------------------------------------------------------------
-std::vector<uint8_t> LEDController::build_frame(const std::vector<uint8_t>& png)
+std::vector<uint8_t> LEDController::build_image_frame(const std::vector<uint8_t>& png,
+                                                      uint8_t save_slot)
 {
     uint32_t data_len  = (uint32_t)png.size();
     uint32_t total_len = data_len + 15;
@@ -89,23 +90,94 @@ std::vector<uint8_t> LEDController::build_frame(const std::vector<uint8_t>& png)
 
     std::vector<uint8_t> frame;
     frame.reserve(total_len);
+
     frame.push_back( total_len        & 0xFF);
     frame.push_back((total_len >>  8) & 0xFF);
-    frame.push_back(0x02);
+    frame.push_back(0x02);            // command ID 0x0002 (raw image)
     frame.push_back(0x00);
-    frame.push_back(0x00);
+    frame.push_back(0x00);            // has_next_chunk
     frame.push_back( data_len        & 0xFF);
     frame.push_back((data_len >>  8) & 0xFF);
-    frame.push_back(0x00);
-    frame.push_back(0x00);
+    frame.push_back((data_len >> 16) & 0xFF);
+    frame.push_back((data_len >> 24) & 0xFF);
     frame.push_back( crc        & 0xFF);
     frame.push_back((crc >>  8) & 0xFF);
     frame.push_back((crc >> 16) & 0xFF);
     frame.push_back((crc >> 24) & 0xFF);
-    frame.push_back(0x00);
-    frame.push_back(0x65);
+    frame.push_back(0x00);            // type_byte (raw)
+    frame.push_back(save_slot);
     frame.insert(frame.end(), png.begin(), png.end());
     return frame;
+}
+
+// ---------------------------------------------------------------------------
+// Build BLE frame for a GIF (Show Image command – GIF variant)
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> LEDController::build_gif_frame(const std::vector<uint8_t>& gif_data,
+                                                    uint8_t save_slot)
+{
+    uint32_t data_len  = (uint32_t)gif_data.size();
+    uint32_t total_len = data_len + 15;
+    uint32_t crc = (uint32_t)crc32(0L, Z_NULL, 0);
+    crc = (uint32_t)crc32(crc, gif_data.data(), data_len);
+
+    std::vector<uint8_t> frame;
+    frame.reserve(total_len);
+
+    frame.push_back( total_len        & 0xFF);
+    frame.push_back((total_len >>  8) & 0xFF);
+    frame.push_back(0x03);            // command ID 0x0003 (GIF)
+    frame.push_back(0x00);
+    frame.push_back(0x00);            // has_next_chunk
+    frame.push_back( data_len        & 0xFF);
+    frame.push_back((data_len >>  8) & 0xFF);
+    frame.push_back((data_len >> 16) & 0xFF);
+    frame.push_back((data_len >> 24) & 0xFF);
+    frame.push_back( crc        & 0xFF);
+    frame.push_back((crc >>  8) & 0xFF);
+    frame.push_back((crc >> 16) & 0xFF);
+    frame.push_back((crc >> 24) & 0xFF);
+    frame.push_back(0x02);            // type_byte (GIF)
+    frame.push_back(save_slot);
+    frame.insert(frame.end(), gif_data.begin(), gif_data.end());
+    return frame;
+}
+
+// ---------------------------------------------------------------------------
+// Build BLE packet for native text
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> LEDController::build_text_payload(
+    const std::string& text, Color fg, Color bg,
+    uint8_t effect_code, uint8_t speed, uint8_t font_scale,
+    uint8_t save_slot)
+{
+    auto total_data = build_text_total_data(text, fg, bg, effect_code, speed, font_scale);
+    uint32_t data_len = (uint32_t)total_data.size();
+    uint32_t pkt_len  = data_len + 15;
+
+    uint32_t crc = (uint32_t)crc32(0L, Z_NULL, 0);
+    crc = (uint32_t)crc32(crc, total_data.data(), data_len);
+
+    std::vector<uint8_t> pkt;
+    pkt.reserve(pkt_len);
+
+    pkt.push_back( pkt_len        & 0xFF);
+    pkt.push_back((pkt_len >>  8) & 0xFF);
+    pkt.push_back(0x00);
+    pkt.push_back(0x01);
+    pkt.push_back(0x00);
+    pkt.push_back( data_len        & 0xFF);
+    pkt.push_back((data_len >>  8) & 0xFF);
+    pkt.push_back((data_len >> 16) & 0xFF);
+    pkt.push_back((data_len >> 24) & 0xFF);
+    pkt.push_back( crc        & 0xFF);
+    pkt.push_back((crc >>  8) & 0xFF);
+    pkt.push_back((crc >> 16) & 0xFF);
+    pkt.push_back((crc >> 24) & 0xFF);
+    pkt.push_back(0x00);
+    pkt.push_back(save_slot);
+    pkt.insert(pkt.end(), total_data.begin(), total_data.end());
+    return pkt;
 }
 
 // ---------------------------------------------------------------------------
@@ -119,9 +191,6 @@ void LEDController::notify_handler(SimpleBLE::ByteArray payload)
     if (p == ACK_S3)                     { ack_stage3_ = true; return; }
 }
 
-// ---------------------------------------------------------------------------
-// Poll flag with timeout
-// ---------------------------------------------------------------------------
 bool LEDController::wait_ack(std::atomic<bool>& flag, int timeout_ms)
 {
     const int step_ms = 10;
@@ -132,9 +201,6 @@ bool LEDController::wait_ack(std::atomic<bool>& flag, int timeout_ms)
     return false;
 }
 
-// ---------------------------------------------------------------------------
-// Low-level write helpers
-// ---------------------------------------------------------------------------
 void LEDController::cmd_write(const std::vector<uint8_t>& data)
 {
     SimpleBLE::ByteArray ba(data.begin(), data.end());
@@ -156,7 +222,7 @@ void LEDController::req_write(const std::vector<uint8_t>& data)
 }
 
 // ---------------------------------------------------------------------------
-// scan_for_led_devices
+// Scan & connect
 // ---------------------------------------------------------------------------
 std::vector<SimpleBLE::Peripheral> LEDController::scan_for_led_devices()
 {
@@ -178,9 +244,6 @@ std::vector<SimpleBLE::Peripheral> LEDController::scan_for_led_devices()
     return found;
 }
 
-// ---------------------------------------------------------------------------
-// scan_led_addresses
-// ---------------------------------------------------------------------------
 std::vector<std::string> LEDController::scan_led_addresses()
 {
     auto devices = scan_for_led_devices();
@@ -191,9 +254,6 @@ std::vector<std::string> LEDController::scan_led_addresses()
     return addresses;
 }
 
-// ---------------------------------------------------------------------------
-// connect_to_peripheral
-// ---------------------------------------------------------------------------
 bool LEDController::connect_to_peripheral(SimpleBLE::Peripheral& dev)
 {
     peripheral_ = dev;
@@ -209,13 +269,9 @@ bool LEDController::connect_to_peripheral(SimpleBLE::Peripheral& dev)
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// connect
-// ---------------------------------------------------------------------------
 bool LEDController::connect()
 {
     auto devices = scan_for_led_devices();
-
     if (devices.empty()) {
         std::cerr << "[!] No LED devices found in scan\n";
         return false;
@@ -245,7 +301,6 @@ bool LEDController::connect()
 
     std::cout << "[...] Connecting to " << devices[choice].identifier()
               << " (" << devices[choice].address() << ")...\n";
-
     if (!connect_to_peripheral(devices[choice]))
         return false;
 
@@ -254,9 +309,6 @@ bool LEDController::connect()
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// connect_silent
-// ---------------------------------------------------------------------------
 bool LEDController::connect_silent(const std::string& address)
 {
     auto devices = scan_for_led_devices();
@@ -273,29 +325,70 @@ bool LEDController::connect_silent(const std::string& address)
 }
 
 // ---------------------------------------------------------------------------
-// screen_off
+// Screen off – sends a black fill (reliable way to blank the display)
 // ---------------------------------------------------------------------------
-void LEDController::screen_off(uint8_t width, uint8_t height)
+void LEDController::screen_off()
 {
-    if (!connected_) return;
-    std::vector<uint8_t> rgb(width * height * 3, 0x00);
-    auto png   = build_png_from_rgb(rgb.data(), width, height);
-    auto frame = build_frame(png);
-    write_raw_data(frame);
+    send_full_frame(0x00, 0x00, 0x00, 32, 32);
     std::cout << "[INFO] Screen blanked\n";
 }
-
 // ---------------------------------------------------------------------------
-// set_brightness
+// Send current system time to the panel
 // ---------------------------------------------------------------------------
-void LEDController::set_brightness(int percent)
+void LEDController::set_current_time()
 {
-    if (percent < 1)   percent = 1;
-    if (percent > 100) percent = 100;
-    brightness_ = percent / 100.0f;
-    std::cout << "[INFO] Brightness set to " << percent << "%\n";
-    if (has_last_frame_ && connected_)
-        send_full_frame(last_r_, last_g_, last_b_, last_width_, last_height_);
+    if (!connected_) return;
+    std::time_t now = std::time(nullptr);
+    struct tm *lt = std::localtime(&now);
+
+    std::vector<uint8_t> cmd = {
+        0x08, 0x00,               // length
+        0x01, 0x80,               // set_time command
+        (uint8_t)lt->tm_hour,
+        (uint8_t)lt->tm_min,
+        (uint8_t)lt->tm_sec,
+        0x00                      // language (English)
+    };
+    cmd_write(cmd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(60));
+}
+// ---------------------------------------------------------------------------
+// Digital Clock
+// ---------------------------------------------------------------------------
+void LEDController::show_digital_clock(uint8_t style, bool is24h,
+                                        bool show_date, time_t when)
+{
+    if (!connected_) return;
+
+    // Sync panel's internal clock with current system time
+    set_current_time();
+
+    if (when == 0) when = std::time(nullptr);
+    struct tm *lt = std::localtime(&when);
+    int year = lt->tm_year + 1900 - 2000;
+    uint8_t month = (uint8_t)(lt->tm_mon + 1);
+    uint8_t day   = (uint8_t)lt->tm_mday;
+    uint8_t dow = (lt->tm_wday == 0) ? 7 : (uint8_t)lt->tm_wday;   // 7 = Sunday
+
+    std::vector<uint8_t> cmd;
+    cmd.reserve(11);
+    cmd.push_back(0x0B);  // length low
+    cmd.push_back(0x00);  // length high
+    cmd.push_back(0x06);  // command 0x0106
+    cmd.push_back(0x01);
+    cmd.push_back(style);
+    cmd.push_back(is24h ? 1 : 0);
+    cmd.push_back(show_date ? 1 : 0);
+    cmd.push_back((uint8_t)year);
+    cmd.push_back(month);
+    cmd.push_back(day);
+    cmd.push_back(dow);
+
+    std::cout << "[INFO] Setting digital clock style=" << (int)style
+              << " 24h=" << (is24h ? "yes" : "no")
+              << " show_date=" << (show_date ? "yes" : "no") << "\n";
+    cmd_write(cmd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
 }
 
 // ---------------------------------------------------------------------------
@@ -341,53 +434,53 @@ void LEDController::send_text_open_sequence(int channel)
 }
 
 // ---------------------------------------------------------------------------
-// Glyph table
+// Glyph table & helpers
 // ---------------------------------------------------------------------------
 static const uint8_t GLYPH_DATA[][10] = {
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // [0] space
-    {0x1C,0x36,0x63,0x63,0x63,0x7F,0x63,0x63,0x63,0x63}, // [1] A
-    {0xFC,0x66,0x66,0x66,0x7C,0x66,0x66,0x66,0x66,0xFC}, // [2] B
-    {0x3C,0x66,0x63,0x60,0x60,0x60,0x60,0x63,0x66,0x3C}, // [3] C
-    {0x3E,0x66,0x63,0x63,0x63,0x63,0x63,0x63,0x66,0x3E}, // [4] D
-    {0x7F,0x60,0x60,0x60,0x7E,0x60,0x60,0x60,0x60,0x7F}, // [5] E
-    {0x7F,0x60,0x60,0x60,0x7E,0x60,0x60,0x60,0x60,0x60}, // [6] F
-    {0x3C,0x66,0x63,0x60,0x60,0x6F,0x63,0x63,0x66,0x3C}, // [7] G
-    {0x63,0x63,0x63,0x63,0x7F,0x63,0x63,0x63,0x63,0x63}, // [8] H
-    {0x3E,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3E}, // [9] I
-    {0x1F,0x06,0x06,0x06,0x06,0x06,0x06,0x66,0x66,0x3C}, // [10] J
-    {0x63,0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x63,0x63}, // [11] K
-    {0x60,0x60,0x60,0x60,0x60,0x60,0x60,0x60,0x60,0x7F}, // [12] L
-    {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x63,0x63,0x63}, // [13] M
-    {0x63,0x73,0x7B,0x7F,0x6F,0x67,0x63,0x63,0x63,0x63}, // [14] N
-    {0x3E,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x3E}, // [15] O
-    {0x3F,0x66,0x66,0x66,0x3E,0x60,0x60,0x60,0x60,0x60}, // [16] P
-    {0x3E,0x63,0x63,0x63,0x63,0x63,0x6B,0x67,0x3E,0x03}, // [17] Q
-    {0x3F,0x66,0x66,0x66,0x3E,0x78,0x6C,0x66,0x63,0x63}, // [18] R
-    {0x3E,0x63,0x60,0x60,0x3E,0x03,0x03,0x03,0x63,0x3E}, // [19] S
-    {0x7F,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C}, // [20] T
-    {0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x3E}, // [21] U
-    {0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x36,0x1C,0x08}, // [22] V
-    {0x63,0x63,0x63,0x63,0x63,0x6B,0x7F,0x7F,0x77,0x63}, // [23] W
-    {0x63,0x63,0x36,0x1C,0x08,0x1C,0x36,0x63,0x63,0x63}, // [24] X
-    {0x63,0x63,0x63,0x36,0x1C,0x0C,0x0C,0x0C,0x0C,0x0C}, // [25] Y
-    {0x7F,0x03,0x06,0x0C,0x18,0x30,0x60,0x60,0x60,0x7F}, // [26] Z
-    {0x3E,0x63,0x63,0x67,0x6B,0x73,0x63,0x63,0x63,0x3E}, // [27] 0
-    {0x0C,0x1C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3E}, // [28] 1
-    {0x3E,0x63,0x03,0x03,0x06,0x0C,0x18,0x30,0x60,0x7F}, // [29] 2
-    {0x3E,0x63,0x03,0x03,0x1E,0x03,0x03,0x03,0x63,0x3E}, // [30] 3
-    {0x06,0x0E,0x1E,0x36,0x66,0x66,0x7F,0x06,0x06,0x06}, // [31] 4
-    {0x7F,0x60,0x60,0x60,0x7E,0x03,0x03,0x03,0x63,0x3E}, // [32] 5
-    {0x1E,0x30,0x60,0x60,0x7E,0x63,0x63,0x63,0x63,0x3E}, // [33] 6
-    {0x7F,0x03,0x03,0x06,0x06,0x0C,0x0C,0x18,0x18,0x18}, // [34] 7
-    {0x3E,0x63,0x63,0x63,0x3E,0x63,0x63,0x63,0x63,0x3E}, // [35] 8
-    {0x3E,0x63,0x63,0x63,0x3F,0x03,0x03,0x06,0x0C,0x38}, // [36] 9
-    {0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x00,0x0C,0x00}, // [37] !
-    {0x3E,0x63,0x03,0x03,0x0E,0x0C,0x0C,0x00,0x0C,0x00}, // [38] ?
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x00}, // [39] .
-    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, // [40] ,
-    {0x00,0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00,0x00}, // [41] -
-    {0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00}, // [42] :
-    {0x01,0x03,0x06,0x06,0x0C,0x18,0x18,0x30,0x60,0x40}, // [43] /
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // space
+    {0x1C,0x36,0x63,0x63,0x63,0x7F,0x63,0x63,0x63,0x63}, // A
+    {0xFC,0x66,0x66,0x66,0x7C,0x66,0x66,0x66,0x66,0xFC}, // B
+    {0x3C,0x66,0x63,0x60,0x60,0x60,0x60,0x63,0x66,0x3C}, // C
+    {0x3E,0x66,0x63,0x63,0x63,0x63,0x63,0x63,0x66,0x3E}, // D
+    {0x7F,0x60,0x60,0x60,0x7E,0x60,0x60,0x60,0x60,0x7F}, // E
+    {0x7F,0x60,0x60,0x60,0x7E,0x60,0x60,0x60,0x60,0x60}, // F
+    {0x3C,0x66,0x63,0x60,0x60,0x6F,0x63,0x63,0x66,0x3C}, // G
+    {0x63,0x63,0x63,0x63,0x7F,0x63,0x63,0x63,0x63,0x63}, // H
+    {0x3E,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3E}, // I
+    {0x1F,0x06,0x06,0x06,0x06,0x06,0x06,0x66,0x66,0x3C}, // J
+    {0x63,0x66,0x6C,0x78,0x70,0x78,0x6C,0x66,0x63,0x63}, // K
+    {0x60,0x60,0x60,0x60,0x60,0x60,0x60,0x60,0x60,0x7F}, // L
+    {0x63,0x77,0x7F,0x7F,0x6B,0x63,0x63,0x63,0x63,0x63}, // M
+    {0x63,0x73,0x7B,0x7F,0x6F,0x67,0x63,0x63,0x63,0x63}, // N
+    {0x3E,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x3E}, // O
+    {0x3F,0x66,0x66,0x66,0x3E,0x60,0x60,0x60,0x60,0x60}, // P
+    {0x3E,0x63,0x63,0x63,0x63,0x63,0x6B,0x67,0x3E,0x03}, // Q
+    {0x3F,0x66,0x66,0x66,0x3E,0x78,0x6C,0x66,0x63,0x63}, // R
+    {0x3E,0x63,0x60,0x60,0x3E,0x03,0x03,0x03,0x63,0x3E}, // S
+    {0x7F,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C}, // T
+    {0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x3E}, // U
+    {0x63,0x63,0x63,0x63,0x63,0x63,0x63,0x36,0x1C,0x08}, // V
+    {0x63,0x63,0x63,0x63,0x63,0x6B,0x7F,0x7F,0x77,0x63}, // W
+    {0x63,0x63,0x36,0x1C,0x08,0x1C,0x36,0x63,0x63,0x63}, // X
+    {0x63,0x63,0x63,0x36,0x1C,0x0C,0x0C,0x0C,0x0C,0x0C}, // Y
+    {0x7F,0x03,0x06,0x0C,0x18,0x30,0x60,0x60,0x60,0x7F}, // Z
+    {0x3E,0x63,0x63,0x67,0x6B,0x73,0x63,0x63,0x63,0x3E}, // 0
+    {0x0C,0x1C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3E}, // 1
+    {0x3E,0x63,0x03,0x03,0x06,0x0C,0x18,0x30,0x60,0x7F}, // 2
+    {0x3E,0x63,0x03,0x03,0x1E,0x03,0x03,0x03,0x63,0x3E}, // 3
+    {0x06,0x0E,0x1E,0x36,0x66,0x66,0x7F,0x06,0x06,0x06}, // 4
+    {0x7F,0x60,0x60,0x60,0x7E,0x03,0x03,0x03,0x63,0x3E}, // 5
+    {0x1E,0x30,0x60,0x60,0x7E,0x63,0x63,0x63,0x63,0x3E}, // 6
+    {0x7F,0x03,0x03,0x06,0x06,0x0C,0x0C,0x18,0x18,0x18}, // 7
+    {0x3E,0x63,0x63,0x63,0x3E,0x63,0x63,0x63,0x63,0x3E}, // 8
+    {0x3E,0x63,0x63,0x63,0x3F,0x03,0x03,0x06,0x0C,0x38}, // 9
+    {0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x0C,0x00,0x0C,0x00}, // !
+    {0x3E,0x63,0x03,0x03,0x0E,0x0C,0x0C,0x00,0x0C,0x00}, // ?
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x00}, // .
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, // ,
+    {0x00,0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00,0x00}, // -
+    {0x00,0x00,0x18,0x00,0x00,0x00,0x18,0x00,0x00,0x00}, // :
+    {0x01,0x03,0x06,0x06,0x0C,0x18,0x18,0x30,0x60,0x40}, // /
 };
 
 static int glyph_index(char ch)
@@ -414,8 +507,6 @@ uint8_t LEDController::reverse_bits(uint8_t v)
     return out;
 }
 
-// scale 1-6: scale N produces N*8 wide x N*10 tall glyph bitmap.
-// Returns raw pixel rows as bytes: each row is (scale) bytes wide.
 std::vector<uint8_t> LEDController::glyph_for_char(char ch, uint8_t scale)
 {
     if (scale < 1) scale = 1;
@@ -435,7 +526,7 @@ std::vector<uint8_t> LEDController::glyph_for_char(char ch, uint8_t scale)
 
     for (int src_row = 0; src_row < 10; ++src_row) {
         uint8_t src_byte = src[src_row];
-        uint8_t row_bytes[6] = {};  // max 6 bytes per row at scale 6
+        uint8_t row_bytes[6] = {};
         for (int src_bit = 0; src_bit < 8; ++src_bit) {
             int pixel_on = (src_byte >> (7 - src_bit)) & 1;
             for (int rep = 0; rep < scale; ++rep) {
@@ -461,11 +552,6 @@ std::vector<uint8_t> LEDController::glyph_for_char(char ch, uint8_t scale)
 
 // ---------------------------------------------------------------------------
 // build_vertical_scroll_frame
-//
-// Renders one frame of a vertical scroll by sampling a tall strip of glyph
-// rows. offset_y is the top pixel of the visible window within the strip.
-// The strip contains all glyphs stacked vertically with 2-pixel gaps between
-// them. Characters are centered horizontally on the panel.
 // ---------------------------------------------------------------------------
 std::vector<uint8_t> LEDController::build_vertical_scroll_frame(
     const std::vector<std::vector<uint8_t>>& glyph_strip,
@@ -474,39 +560,31 @@ std::vector<uint8_t> LEDController::build_vertical_scroll_frame(
     Color fg, Color bg,
     uint8_t width, uint8_t height)
 {
-    // Each glyph in the strip occupies glyph_h rows + 2 gap rows.
     const int slot_h = glyph_h + 2;
     const int strip_total = (int)glyph_strip.size() * slot_h;
     const int bytes_per_glyph_row = (glyph_w + 7) / 8;
-    // Center glyph horizontally
     const int x_start = (width - glyph_w) / 2;
 
     std::vector<uint8_t> rgb(width * height * 3);
-    // Fill background
     for (int i = 0; i < width * height; ++i) {
         rgb[i*3+0] = bg.r; rgb[i*3+1] = bg.g; rgb[i*3+2] = bg.b;
     }
 
     for (int screen_y = 0; screen_y < height; ++screen_y) {
-        // Map screen row to strip row (wrapping for seamless loop)
         int strip_y = ((offset_y + screen_y) % strip_total + strip_total) % strip_total;
         int glyph_idx = strip_y / slot_h;
         int row_in_slot = strip_y % slot_h;
 
-        // Skip gap rows or out-of-bounds glyphs
         if (row_in_slot >= glyph_h) continue;
         if (glyph_idx >= (int)glyph_strip.size()) continue;
 
         const auto& glyph = glyph_strip[glyph_idx];
-        // Each glyph row is bytes_per_glyph_row bytes
         int row_byte_offset = row_in_slot * bytes_per_glyph_row;
 
         for (int gx = 0; gx < glyph_w; ++gx) {
             int screen_x = x_start + gx;
             if (screen_x < 0 || screen_x >= width) continue;
 
-            // Extract bit: glyph bytes are stored MSB-first after reverse_bits
-            // reverse_bits was already applied in glyph_for_char, so bit 7 = leftmost pixel
             int byte_idx = row_byte_offset + gx / 8;
             int bit_pos  = 7 - (gx % 8);
             bool lit = false;
@@ -524,10 +602,6 @@ std::vector<uint8_t> LEDController::build_vertical_scroll_frame(
 
 // ---------------------------------------------------------------------------
 // send_vertical_scroll
-//
-// Software vertical scroll (end-credits style). Renders each character as a
-// glyph bitmap and scrolls them upward via successive image frames.
-// Loops once through the full text then stops.
 // ---------------------------------------------------------------------------
 void LEDController::send_vertical_scroll(const std::string& text,
                                           Color fg, Color bg,
@@ -542,49 +616,37 @@ void LEDController::send_vertical_scroll(const std::string& text,
 
     std::string t = text.empty() ? " " : text;
 
-    // Glyph dimensions for this scale
     const int glyph_w = 8 * font_scale;
     const int glyph_h = 10 * font_scale;
-    const int slot_h  = glyph_h + 2 * font_scale; // gap scales with font
+    const int slot_h  = glyph_h + 2 * font_scale;
 
-    // Build glyph strip (one entry per character)
     std::vector<std::vector<uint8_t>> strip;
     strip.reserve(t.size());
     for (char ch : t)
         strip.push_back(glyph_for_char(ch, font_scale));
 
-    // Total strip height (with gaps between chars)
     const int strip_total = (int)strip.size() * slot_h;
-
-    // Scroll speed: map speed byte (1-255) to milliseconds per pixel step.
-    // speed=0x50 (80) => ~40ms per pixel => moderate pace.
-    // Lower ms = faster scroll.
     int ms_per_pixel = std::max(5, 200 - (int)speed);
 
     std::cout << "[INFO] Vertical scroll: " << t.size() << " chars, "
               << glyph_w << "x" << glyph_h << " glyphs, scale=" << (int)font_scale
               << ", strip_h=" << strip_total << "px\n";
 
-    // Scroll: start with text entering from the bottom, finish after last char exits top.
-    // We scroll strip_total + height total pixels.
     const int total_scroll = strip_total + height;
 
     for (int offset = 0; offset < total_scroll; ++offset) {
-        // offset_y = strip position at top of screen.
-        // Start: text enters from below (offset_y = -height initially, text at bottom).
         int offset_y = offset - height;
 
         auto rgb = build_vertical_scroll_frame(strip, glyph_w, slot_h,
                                                 offset_y, fg, bg, width, height);
 
-        // Apply brightness
         for (auto& ch : rgb) {
             int v = static_cast<int>(ch * brightness_);
             ch = static_cast<uint8_t>(v > 255 ? 255 : v);
         }
 
         auto png   = build_png_from_rgb(rgb.data(), width, height);
-        auto frame = build_frame(png);
+        auto frame = build_image_frame(png, 0x65);
         write_raw_data(frame);
 
         std::this_thread::sleep_for(std::chrono::milliseconds(ms_per_pixel));
@@ -642,41 +704,6 @@ std::vector<uint8_t> LEDController::build_text_total_data(
 }
 
 // ---------------------------------------------------------------------------
-// build_text_payload
-// ---------------------------------------------------------------------------
-std::vector<uint8_t> LEDController::build_text_payload(
-    const std::string& text, Color fg, Color bg,
-    uint8_t effect_code, uint8_t speed, uint8_t font_scale)
-{
-    auto total_data = build_text_total_data(text, fg, bg, effect_code, speed, font_scale);
-    uint32_t data_len = (uint32_t)total_data.size();
-    uint32_t pkt_len  = data_len + 15;
-
-    uint32_t crc = (uint32_t)crc32(0L, Z_NULL, 0);
-    crc = (uint32_t)crc32(crc, total_data.data(), data_len);
-
-    std::vector<uint8_t> pkt;
-    pkt.reserve(pkt_len);
-    pkt.push_back( pkt_len        & 0xFF);
-    pkt.push_back((pkt_len >>  8) & 0xFF);
-    pkt.push_back(0x00);
-    pkt.push_back(0x01);
-    pkt.push_back(0x00);
-    pkt.push_back( data_len        & 0xFF);
-    pkt.push_back((data_len >>  8) & 0xFF);
-    pkt.push_back((data_len >> 16) & 0xFF);
-    pkt.push_back((data_len >> 24) & 0xFF);
-    pkt.push_back( crc        & 0xFF);
-    pkt.push_back((crc >>  8) & 0xFF);
-    pkt.push_back((crc >> 16) & 0xFF);
-    pkt.push_back((crc >> 24) & 0xFF);
-    pkt.push_back(0x00);
-    pkt.push_back(0x65);
-    pkt.insert(pkt.end(), total_data.begin(), total_data.end());
-    return pkt;
-}
-
-// ---------------------------------------------------------------------------
 // send_text
 // ---------------------------------------------------------------------------
 void LEDController::send_text(const std::string& text,
@@ -684,7 +711,6 @@ void LEDController::send_text(const std::string& text,
 {
     if (!connected_) return;
 
-    // Vertical scroll is software-rendered via image frames.
     if (opts.effect == TextEffect::ScrollUp) {
         send_vertical_scroll(text, fg, bg, opts.speed, opts.font_scale, 32, 32);
         return;
@@ -699,7 +725,7 @@ void LEDController::send_text(const std::string& text,
 
     send_text_open_sequence(3);
 
-    auto payload = build_text_payload(text, fg, bg, effect_code, speed, font_scale);
+    auto payload = build_text_payload(text, fg, bg, effect_code, speed, font_scale, 0x65);
     std::cout << "[INFO] text=\"" << text
               << "\" effect=" << (int)effect_code
               << " speed=" << (int)speed
@@ -718,7 +744,7 @@ void LEDController::send_text(const std::string& text,
 }
 
 // ---------------------------------------------------------------------------
-// send_full_frame
+// send_full_frame (display only)
 // ---------------------------------------------------------------------------
 void LEDController::send_full_frame(uint8_t r, uint8_t g, uint8_t b,
                                      uint8_t width, uint8_t height)
@@ -741,13 +767,47 @@ void LEDController::send_full_frame(uint8_t r, uint8_t g, uint8_t b,
     }
 
     auto png   = build_png_from_rgb(rgb.data(), width, height);
-    auto frame = build_frame(png);
+    auto frame = build_image_frame(png, 0x65);
 
     std::cout << "[INFO] Sending " << (int)width << "x" << (int)height
               << " brightness=" << static_cast<int>(brightness_ * 100.0f + 0.5f) << "%"
               << " png=" << png.size() << "B  frame=" << frame.size() << "B\n";
 
     write_raw_data(frame);
+}
+
+// ---------------------------------------------------------------------------
+// save_full_frame (save to slot)
+// ---------------------------------------------------------------------------
+void LEDController::save_full_frame(uint8_t r, uint8_t g, uint8_t b,
+                                     uint8_t slot, uint8_t width, uint8_t height)
+{
+    if (!connected_) return;
+    if (slot < 1 || slot > 100) {
+        std::cerr << "[!] Invalid slot number (1-100)\n";
+        return;
+    }
+
+    auto scale = [&](uint8_t ch) -> uint8_t {
+        int v = static_cast<int>(ch * brightness_);
+        return static_cast<uint8_t>(v < 0 ? 0 : v > 255 ? 255 : v);
+    };
+    uint8_t sr = scale(r), sg = scale(g), sb = scale(b);
+
+    std::vector<uint8_t> rgb(width * height * 3);
+    for (int i = 0; i < width * height; ++i) {
+        rgb[i*3+0] = sr; rgb[i*3+1] = sg; rgb[i*3+2] = sb;
+    }
+
+    auto png   = build_png_from_rgb(rgb.data(), width, height);
+    auto frame = build_image_frame(png, slot);
+
+    std::cout << "[INFO] Saving solid colour " << (int)width << "x" << (int)height
+              << " to slot " << (int)slot << "  png=" << png.size()
+              << "B  frame=" << frame.size() << "B\n";
+
+    write_raw_data(frame);
+    std::cout << "[OK] Frame saved to device flash slot " << (int)slot << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -785,13 +845,37 @@ void LEDController::disconnect()
 }
 
 // ---------------------------------------------------------------------------
-// send_image_file  — uses image_loader for all format handling
+// send_image_file (display only, GIF aware)
 // ---------------------------------------------------------------------------
 void LEDController::send_image_file(const std::string& path,
                                      uint8_t width, uint8_t height)
 {
     if (!connected_) return;
 
+    // Check extension for GIF
+    std::string ext;
+    auto dot = path.rfind('.');
+    if (dot != std::string::npos) {
+        ext = path.substr(dot);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+    }
+
+    if (ext == ".gif") {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            std::cerr << "[!] Cannot open GIF file: " << path << "\n";
+            return;
+        }
+        std::vector<uint8_t> gif_data((std::istreambuf_iterator<char>(file)),
+                                      std::istreambuf_iterator<char>());
+        auto frame = build_gif_frame(gif_data, 0x65);
+        std::cout << "[INFO] Sending animated GIF (" << gif_data.size() << " bytes)\n";
+        write_raw_data(frame);
+        return;
+    }
+
+    // Standard image
     std::cout << "[INFO] Loading image: " << path << "\n";
     auto rgb = load_image_for_panel(path, (int)width, (int)height);
     if (rgb.empty()) return;
@@ -802,10 +886,105 @@ void LEDController::send_image_file(const std::string& path,
     }
 
     auto png   = build_png_from_rgb(rgb.data(), width, height);
-    auto frame = build_frame(png);
+    auto frame = build_image_frame(png, 0x65);
     std::cout << "[INFO] Image " << (int)width << "x" << (int)height
               << "  png=" << png.size() << "B  frame=" << frame.size() << "B\n";
     write_raw_data(frame);
+}
+
+// ---------------------------------------------------------------------------
+// save_image_file (save to slot, GIF aware)
+// ---------------------------------------------------------------------------
+void LEDController::save_image_file(const std::string& path,
+                                     uint8_t slot, uint8_t width, uint8_t height)
+{
+    if (!connected_) return;
+    if (slot < 1 || slot > 100) {
+        std::cerr << "[!] Invalid slot number (1-100)\n";
+        return;
+    }
+
+    std::string ext;
+    auto dot = path.rfind('.');
+    if (dot != std::string::npos) {
+        ext = path.substr(dot);
+        std::transform(ext.begin(), ext.end(), ext.begin(),
+                       [](unsigned char c){ return (char)std::tolower(c); });
+    }
+
+    if (ext == ".gif") {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) {
+            std::cerr << "[!] Cannot open GIF file: " << path << "\n";
+            return;
+        }
+        std::vector<uint8_t> gif_data((std::istreambuf_iterator<char>(file)),
+                                      std::istreambuf_iterator<char>());
+        auto frame = build_gif_frame(gif_data, slot);
+        std::cout << "[INFO] Saving animated GIF (" << gif_data.size()
+                  << " bytes) to slot " << (int)slot << "\n";
+        write_raw_data(frame);
+        std::cout << "[OK] GIF saved to device flash slot " << (int)slot << "\n";
+        return;
+    }
+
+    std::cout << "[INFO] Loading image for save: " << path << "\n";
+    auto rgb = load_image_for_panel(path, (int)width, (int)height);
+    if (rgb.empty()) return;
+
+    for (auto& ch : rgb) {
+        int v = static_cast<int>(ch * brightness_);
+        ch = static_cast<uint8_t>(v > 255 ? 255 : v);
+    }
+
+    auto png   = build_png_from_rgb(rgb.data(), width, height);
+    auto frame = build_image_frame(png, slot);
+    std::cout << "[INFO] Saving image " << (int)width << "x" << (int)height
+              << " to slot " << (int)slot << "  png=" << png.size()
+              << "B  frame=" << frame.size() << "B\n";
+    write_raw_data(frame);
+    std::cout << "[OK] Image saved to device flash slot " << (int)slot << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// save_text
+// ---------------------------------------------------------------------------
+void LEDController::save_text(const std::string& text,
+                               uint8_t slot,
+                               Color fg, Color bg,
+                               const TextOptions& opts)
+{
+    if (!connected_) return;
+    if (slot < 1 || slot > 100) {
+        std::cerr << "[!] Invalid slot number (1-100)\n";
+        return;
+    }
+
+    uint8_t effect_code = static_cast<uint8_t>(opts.effect);
+    if (opts.effect == TextEffect::ScrollUp) {
+        std::cerr << "[!] ScrollUp is not storable; using Fixed effect.\n";
+        effect_code = static_cast<uint8_t>(TextEffect::Fixed);
+    }
+
+    uint8_t speed      = opts.speed < 1 ? 1 : opts.speed;
+    uint8_t font_scale = opts.font_scale < 1 ? 1 : (opts.font_scale > 6 ? 6 : opts.font_scale);
+
+    send_text_open_sequence(3);
+
+    auto payload = build_text_payload(text, fg, bg, effect_code, speed, font_scale, slot);
+    std::cout << "[INFO] Saving text \"" << text << "\" to slot " << (int)slot
+              << " payload=" << payload.size() << "B\n";
+
+    const int CHUNK_SIZE  = 509;
+    const int INTERVAL_MS = 60;
+    for (size_t offset = 0; offset < payload.size(); offset += CHUNK_SIZE) {
+        size_t len = std::min<size_t>(CHUNK_SIZE, payload.size() - offset);
+        std::vector<uint8_t> chunk(payload.begin() + offset,
+                                   payload.begin() + offset + len);
+        cmd_write(chunk);
+        std::this_thread::sleep_for(std::chrono::milliseconds(INTERVAL_MS));
+    }
+    std::cout << "[OK] Text saved to device flash slot " << (int)slot << "\n";
 }
 
 // ---------------------------------------------------------------------------
@@ -954,7 +1133,6 @@ std::vector<uint8_t> LEDController::build_pattern_rgb(
         break;
     }
     case PatternType::GradientLeft:
-        // Left = dark (bg), right = bright (fg)
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 float t = (float)x / (float)(width - 1);
@@ -967,7 +1145,6 @@ std::vector<uint8_t> LEDController::build_pattern_rgb(
         }
         break;
     case PatternType::GradientRight:
-        // Right = dark (bg), left = bright (fg)
         for (int y = 0; y < height; ++y) {
             for (int x = 0; x < width; ++x) {
                 float t = 1.0f - (float)x / (float)(width - 1);
@@ -980,7 +1157,6 @@ std::vector<uint8_t> LEDController::build_pattern_rgb(
         }
         break;
     case PatternType::GradientDown:
-        // Top = dark (bg), bottom = bright (fg)
         for (int y = 0; y < height; ++y) {
             float t = (float)y / (float)(height - 1);
             Color c;
@@ -991,7 +1167,6 @@ std::vector<uint8_t> LEDController::build_pattern_rgb(
         }
         break;
     case PatternType::GradientUp:
-        // Bottom = dark (bg), top = bright (fg)
         for (int y = 0; y < height; ++y) {
             float t = 1.0f - (float)y / (float)(height - 1);
             Color c;
@@ -1027,8 +1202,93 @@ void LEDController::send_pattern(PatternType type,
     }
 
     auto png   = build_png_from_rgb(rgb.data(), width, height);
-    auto frame = build_frame(png);
+    auto frame = build_image_frame(png, 0x65);
     std::cout << "[INFO] Pattern sent  png=" << png.size()
               << "B  frame=" << frame.size() << "B\n";
     write_raw_data(frame);
+}
+
+// ---------------------------------------------------------------------------
+// save_pattern
+// ---------------------------------------------------------------------------
+void LEDController::save_pattern(PatternType type,
+                                  uint8_t slot,
+                                  Color fg, Color bg,
+                                  uint8_t width, uint8_t height)
+{
+    if (!connected_) return;
+    if (slot < 1 || slot > 100) {
+        std::cerr << "[!] Invalid slot number (1-100)\n";
+        return;
+    }
+
+    auto rgb = build_pattern_rgb(type, fg, bg, width, height);
+    for (auto& ch : rgb) {
+        int v = static_cast<int>(ch * brightness_);
+        ch = static_cast<uint8_t>(v > 255 ? 255 : v);
+    }
+
+    auto png   = build_png_from_rgb(rgb.data(), width, height);
+    auto frame = build_image_frame(png, slot);
+    std::cout << "[INFO] Saving pattern to slot " << (int)slot
+              << "  png=" << png.size() << "B  frame=" << frame.size() << "B\n";
+    write_raw_data(frame);
+    std::cout << "[OK] Pattern saved to device flash slot " << (int)slot << "\n";
+}
+
+// ---------------------------------------------------------------------------
+// Slot management
+// ---------------------------------------------------------------------------
+void LEDController::delete_slots(const std::vector<uint8_t>& slots)
+{
+    if (!connected_) return;
+    if (slots.empty()) {
+        std::cerr << "[!] No slots to delete\n";
+        return;
+    }
+    for (auto s : slots) {
+        if (s < 1 || s > 100) {
+            std::cerr << "[!] Invalid slot number " << (int)s << " (1-100)\n";
+            return;
+        }
+    }
+
+    uint16_t count = (uint16_t)slots.size();
+    uint16_t cmd_len = 4 + 2 + count;
+    std::vector<uint8_t> cmd;
+    cmd.push_back( cmd_len        & 0xFF);
+    cmd.push_back((cmd_len >>  8) & 0xFF);
+    cmd.push_back(0x02);
+    cmd.push_back(0x01);
+    cmd.push_back( count        & 0xFF);
+    cmd.push_back((count >>  8) & 0xFF);
+    cmd.insert(cmd.end(), slots.begin(), slots.end());
+
+    std::cout << "[INFO] Deleting " << (int)count << " slot(s)...\n";
+    cmd_write(cmd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::cout << "[OK] Slots deleted\n";
+}
+
+void LEDController::delete_all_slots()
+{
+    if (!connected_) return;
+    std::vector<uint8_t> cmd = {0x04, 0x00, 0x03, 0x80};
+    std::cout << "[INFO] Clearing all slots...\n";
+    cmd_write(cmd);
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    std::cout << "[OK] All slots cleared\n";
+}
+
+// ---------------------------------------------------------------------------
+// Brightness
+// ---------------------------------------------------------------------------
+void LEDController::set_brightness(int percent)
+{
+    if (percent < 1)   percent = 1;
+    if (percent > 100) percent = 100;
+    brightness_ = percent / 100.0f;
+    std::cout << "[INFO] Brightness set to " << percent << "%\n";
+    if (has_last_frame_ && connected_)
+        send_full_frame(last_r_, last_g_, last_b_, last_width_, last_height_);
 }
