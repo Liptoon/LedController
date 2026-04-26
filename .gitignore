@@ -1,0 +1,15 @@
+# Wyklucz cały katalog docs
+docs/
+.vscode/
+# Wyklucz pliki binarne (typowe rozszerzenia)
+*.exe
+*.dll
+*.so
+*.dylib
+*.bin
+*.o
+*.a
+*.out
+
+# Wyklucz konkretny plik bez rozszerzenia
+led_controller
