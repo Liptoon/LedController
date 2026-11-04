@@ -14,7 +14,7 @@ A C++ application for driving BK-Light / iPixel 32x32 RGB LED matrix panels over
 **Runtime**
 
 - Linux with BlueZ and a BLE 4.0+ adapter
-- The panel must be advertising with "LED" anywhere in its device name (standard BK-Light / iPixel firmware)
+- The panel is recognised by a device name starting with `LED_BLE` and/or by the advertised GATT service `000000fa-0000-1000-8000-00805f9b34fb` (standard BK-Light / iPixel firmware). Other devices that merely contain "LED" in their name are ignored.
 - [stb_image.h](https://github.com/nothings/stb/blob/master/stb_image.h) — place this single header in the project root before building
 
 ## Building
@@ -35,7 +35,7 @@ The makefile compiles `main.cpp`, `led_sniffer.cpp`, and `image_loader.cpp` with
 
 ### Interactive TUI
 
-Run without arguments to enter the interactive menu. The application scans for BLE devices whose name contains "LED", presents a numbered list with a confirmation prompt, connects, then opens a full-screen terminal UI navigated with arrow keys.
+Run without arguments to enter the interactive menu. The application scans for LED panels — devices whose name starts with `LED_BLE` or that advertise the `0xfa00` GATT service — presents a numbered list with a confirmation prompt, connects, then opens a full-screen terminal UI navigated with arrow keys.
 
 The TUI remembers your last selected item so you can quickly repeat actions. Press Enter or Space to select, Q or Escape to go back to the previous menu or exit.
 
@@ -45,7 +45,7 @@ The TUI remembers your last selected item so you can quickly repeat actions. Pre
 
 ### CLI — send text
 
-Scans for all LED devices and sends the text to every one found.
+Scans for all LED panels and sends the text to every one found; unrelated BLE devices with "LED" in their name are skipped.
 
 ```bash
 ./led_controller -t "HELLO" [options]
@@ -192,7 +192,7 @@ Delete operations:
 
 ## Device discovery
 
-All CLI commands scan for BLE devices whose identifier contains the string `"LED"` and attempt to connect to every matching device found. For single-panel setups this is transparent. For multi-panel setups reachable from the same BLE adapter, all panels receive the same command simultaneously.
+All CLI commands scan for LED panels — devices whose identifier starts with `LED_BLE` or that advertise the `0xfa00` GATT service — and attempt to connect to every matching panel found. Other BLE devices containing "LED" in their name (for example `BJ_LED`) are ignored. For single-panel setups this is transparent. For multi-panel setups reachable from the same BLE adapter, all panels receive the same command simultaneously. A failed connection to one panel is reported and skipped instead of aborting the whole command.
 
 The interactive TUI connects to exactly one device chosen from the scan results.
 
@@ -248,4 +248,4 @@ The panel uses a GATT service on UUID `000000fa-0000-1000-8000-00805f9b34fb` wit
 - Brightness changes do not repaint text or image frames automatically; only the last solid colour frame is repainted.
 - The software vertical scroll (`-scroll-v` / `TextEffect::ScrollUp`) cannot be saved to a flash slot; it is converted to `Fixed` with a warning.
 - The digital clock runs on the panel's internal clock after disconnect; accuracy depends on the panel's own RTC.
-- Multi-panel CLI mode sends to all discovered devices matching "LED" in their name; there is no per-device address filter on the CLI.
+- Multi-panel CLI mode sends to all discovered LED panels (name prefix `LED_BLE` or advertised `0xfa00` service); there is no per-device address filter on the CLI.

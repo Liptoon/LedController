@@ -238,9 +238,18 @@ std::vector<SimpleBLE::Peripheral> LEDController::scan_for_led_devices()
     auto all = adapter.scan_get_results();
 
     std::vector<SimpleBLE::Peripheral> found;
-    for (auto& dev : all)
-        if (dev.identifier().find("LED") != std::string::npos)
+    for (auto& dev : all) {
+        bool target = dev.identifier().rfind("LED_BLE", 0) == 0;
+        if (!target) {
+            try {
+                for (auto& svc : dev.services())
+                    if (svc.uuid() == SVC_FA00) { target = true; break; }
+            } catch (const std::exception&) {
+            }
+        }
+        if (target)
             found.push_back(dev);
+    }
     return found;
 }
 
@@ -257,13 +266,20 @@ std::vector<std::string> LEDController::scan_led_addresses()
 bool LEDController::connect_to_peripheral(SimpleBLE::Peripheral& dev)
 {
     peripheral_ = dev;
-    peripheral_.connect();
-    if (!peripheral_.is_connected()) {
-        std::cerr << "[!] Connection failed: " << dev.address() << "\n";
+    try {
+        peripheral_.connect();
+        if (!peripheral_.is_connected()) {
+            std::cerr << "[!] Connection failed: " << dev.address() << "\n";
+            return false;
+        }
+        peripheral_.notify(SVC_FA00, CHR_FA03,
+            [this](SimpleBLE::ByteArray p) { notify_handler(p); });
+    } catch (const std::exception& e) {
+        std::cerr << "[!] Connect failed: " << dev.identifier()
+                  << " (" << dev.address() << "): " << e.what() << "\n";
+        connected_ = false;
         return false;
     }
-    peripheral_.notify(SVC_FA00, CHR_FA03,
-        [this](SimpleBLE::ByteArray p) { notify_handler(p); });
     connected_ = true;
     handshake_primed_ = false;
     return true;
